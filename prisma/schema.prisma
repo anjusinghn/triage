@@ -1,0 +1,83 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Job {
+  id                      String        @id @default(uuid())
+  title                   String
+  description             String
+  slug                    String        @unique
+  mustHaveSkills          String[]      @default([])
+  niceToHaveSkills        String[]      @default([])
+  requiredExperienceYears Int           @default(5)
+  department              String        @default("Engineering")
+  location                String        @default("Remote")
+  locationType            String        @default("hybrid")
+  employmentType          String        @default("full-time")
+  salaryMin               Int           @default(120000)
+  salaryMax               Int           @default(180000)
+  createdAt               DateTime      @default(now())
+  applicants              Application[]
+}
+
+model Candidate {
+  id            String         @id @default(uuid())
+  name          String
+  email         String?
+  resumeUrl     String?
+  skills        String[]
+  experience    Json?
+  education     Json?
+  createdAt     DateTime       @default(now())
+  applications  Application[]
+  parsedResumes ParsedResume[]
+}
+
+model ParsedResume {
+  id                   String   @id @default(uuid())
+  candidateId          String
+  contentHash          String   @unique
+  fileName             String
+  mimeType             String   @default("application/pdf")
+  extractedText        String
+  normalizedText       String?
+  skills               Json
+  workExperience       Json
+  education            Json
+  totalYearsExperience Int      @default(0)
+  highestSeniority     String?
+  source               String   @default("upload")
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId])
+  @@index([fileName])
+}
+
+model Application {
+  id                 String   @id @default(uuid())
+  jobId              String
+  candidateId        String
+  matchScore         Int
+  justification      String
+  tier               String   @default("maybe")
+  skillMatch         Int      @default(0)
+  experienceMatch    Int      @default(0)
+  domainFit          Int      @default(0)
+  semanticFit        Int      @default(0)
+  strengths          String[] @default([])
+  concerns           String[] @default([])
+  recommendedAction  String   @default("manual_review")
+  aiSummary          String?
+  fileName           String?
+  createdAt          DateTime @default(now())
+
+  job       Job       @relation(fields: [jobId], references: [id])
+  candidate Candidate @relation(fields: [candidateId], references: [id])
+}
