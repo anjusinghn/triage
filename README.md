@@ -24,7 +24,8 @@
 
 ## Architecture
 
-<img width="1394" height="477" alt="image" src="https://github.com/user-attachments/assets/72482eb0-8af9-4488-bd70-e805af6bd539" />
+![Uploading image.png…]()
+
 
 
 | Layer | Path | Responsibility |
