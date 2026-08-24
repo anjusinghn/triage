@@ -1,8 +1,4 @@
-# Smart Screener AI
-
-<p align="center">
-  <em>AI-powered resume screening, done right.</em>
-</p>
+# Smart Resume Screener AI
 
 <p align="center">
   <img src="https://img.shields.io/badge/Next.js%2016-black?style=flat-square&logo=next.js" alt="Next.js 16" />
@@ -24,7 +20,8 @@
 
 ## Architecture
 
-![Uploading image.png…]()
+<img width="1702" height="629" alt="image" src="https://github.com/user-attachments/assets/2a45692a-96b8-4101-b3e8-e71643b5d6fd" />
+
 
 
 
