@@ -84,7 +84,7 @@ export default function AIReviewerPage() {
   const [selectedJobId, setSelectedJobId] = useState('');
   const [positionEditorMode, setPositionEditorMode] = useState<'view' | 'edit' | 'create'>('view');
   const [jobs, setJobs] = useState<ATSJobPosting[]>([]);
-  const [generatedCount, setGeneratedCount] = useState(0);
+  const [generatedCount, setGeneratedCount] = useState(GENERATED_RESUME_CAP);
   const [attachGeneratedResumes, setAttachGeneratedResumes] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -272,7 +272,8 @@ export default function AIReviewerPage() {
       : 0
     : 0;
 
-  const canStartReview = files.length > 0 && Boolean(selectedJobId);
+  const canStartReview =
+    Boolean(selectedJobId) && (files.length > 0 || generatedCount > 0);
   const resumeCount = attachGeneratedResumes
     ? generatedCount + files.length
     : files.length;
@@ -317,12 +318,19 @@ export default function AIReviewerPage() {
       setAttachGeneratedResumes(opts.useExistingResumes);
 
       try {
-        const { sessionId: nextSessionId } = await startAtsReview({
+        const started = await startAtsReview({
           jobId: selectedJobId,
           attachGeneratedResumes: opts.useExistingResumes,
           files: opts.extraFiles && opts.extraFiles.length > 0 ? opts.extraFiles : undefined,
         });
-        setSessionId(nextSessionId);
+        setSessionId(started.sessionId);
+        if (started.status === 'completed' && started.results.length > 0) {
+          setReviewedCandidates(started.results);
+          setHasReviewed(true);
+          setIsReviewing(false);
+          setLiveProgress(null);
+          return;
+        }
         setIsReviewing(true);
       } catch (err) {
         const message = publicClientError(err, 'Failed to start review.');
@@ -342,11 +350,7 @@ export default function AIReviewerPage() {
     try {
       const listed = await listGeneratedResumes();
       const cappedCount = Math.min(listed.count, GENERATED_RESUME_CAP);
-      setGeneratedCount(cappedCount);
-      if (cappedCount === 0) {
-        setErrorMessage('No pre-generated resumes were found on the server.');
-        return;
-      }
+      setGeneratedCount(cappedCount || GENERATED_RESUME_CAP);
       await beginReview({ useExistingResumes: true });
     } catch (err) {
       const message = publicClientError(err, 'Failed to start pre-generated review.');
@@ -381,7 +385,10 @@ export default function AIReviewerPage() {
       setErrorMessage('Drop or select PDF files first, or use the existing resume set.');
       return;
     }
-    await beginReview({ useExistingResumes: false, extraFiles: files });
+    await beginReview({
+      useExistingResumes: files.length === 0,
+      extraFiles: files.length > 0 ? files : undefined,
+    });
   }, [beginReview, canStartReview, files]);
 
   const toggleSort = useCallback(
@@ -694,7 +701,7 @@ export default function AIReviewerPage() {
                 type="button"
                 variant="outline"
                 onClick={handleUseExistingResumes}
-                disabled={attaching || isReviewing || startingReview || generatedCount === 0}
+                disabled={attaching || isReviewing || startingReview}
                 className="h-11 w-full border-[#15aabf] text-[#15aabf] hover:bg-[#15aabf]/10"
               >
                 {attaching || (startingReview && attachGeneratedResumes) ? (

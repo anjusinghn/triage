@@ -62,3 +62,27 @@ export async function scoreResumeWithFireworks(args: {
     })
   );
 }
+
+/** Deterministic ATS score from resume text. No network, no rate limit. */
+export async function scoreResumeLocally(args: {
+  candidateName: string;
+  email?: string;
+  resumeBuffer: Buffer;
+  resumeFileName: string;
+  resumeMimeType?: string;
+  job: JobInput;
+}): Promise<ATSEngineOutput> {
+  return scoreCandidate({
+    candidate: {
+      name: args.candidateName,
+      email: args.email ?? '',
+      phone: '',
+      linkedinUrl: '',
+      resumeBuffer: args.resumeBuffer,
+      resumeMimeType: args.resumeMimeType ?? 'application/pdf',
+      resumeFileName: args.resumeFileName,
+    },
+    job: args.job,
+    options: { skipLLM: true },
+  });
+}

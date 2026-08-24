@@ -6,7 +6,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { prisma } from '@/lib/prisma';
-import { scoreResumeWithFireworks, createJobInput } from '@/lib/ats-engine';
+import { scoreResumeWithFireworks, scoreResumeLocally, createJobInput } from '@/lib/ats-engine';
 import { parseResume, getRecommendedAction } from '@/src/ats-engine/index';
 import type { ATSEngineOutput, DecisionBand, JobInput } from '@/src/ats-engine/index';
 import { peekInferenceRateLimit } from '@/lib/rate-limiter';
@@ -446,7 +446,8 @@ async function persistReviewedCandidate(
 async function processQueuedResume(
   sessionId: string,
   jobInput: JobInput,
-  item: QueuedResume
+  item: QueuedResume,
+  options?: { skipLlm?: boolean }
 ): Promise<void> {
   const session = getAtsSession(sessionId);
   if (!session) return;
@@ -473,13 +474,20 @@ async function processQueuedResume(
       throw new Error(`Resume bytes missing for ${item.fileName}`);
     }
 
-    const output = await scoreResumeWithFireworks({
-      candidateName: fallbackName,
-      resumeBuffer,
-      resumeFileName: item.fileName,
-      job: jobInput,
-      clientIp: session.clientIp,
-    });
+    const output = options?.skipLlm
+      ? await scoreResumeLocally({
+          candidateName: fallbackName,
+          resumeBuffer,
+          resumeFileName: item.fileName,
+          job: jobInput,
+        })
+      : await scoreResumeWithFireworks({
+          candidateName: fallbackName,
+          resumeBuffer,
+          resumeFileName: item.fileName,
+          job: jobInput,
+          clientIp: session.clientIp,
+        });
 
     let reviewed = mapEngineOutputToCandidate({
       candidateId: item.candidateId,
@@ -530,14 +538,21 @@ async function processQueuedResume(
   }
 }
 
-async function runAtsReview(sessionId: string, jobInput: JobInput, queue: QueuedResume[]) {
+async function runAtsReview(
+  sessionId: string,
+  jobInput: JobInput,
+  queue: QueuedResume[],
+  options?: { skipLlm?: boolean }
+) {
   const session = getAtsSession(sessionId);
   if (!session) return;
 
   session.progress.status = 'running';
 
   try {
-    await Promise.all(queue.map((item) => processQueuedResume(sessionId, jobInput, item)));
+    for (const item of queue) {
+      await processQueuedResume(sessionId, jobInput, item, options);
+    }
     session.progress.status = 'completed';
     session.progress.currentCandidate = undefined;
     session.progress.elapsedTimeMs = Date.now() - session.startedAt;
@@ -694,7 +709,11 @@ export async function startAtsReview(input: {
   jobId: string;
   attachGeneratedResumes: boolean;
   files?: File[];
-}): Promise<{ sessionId: string }> {
+}): Promise<{
+  sessionId: string;
+  status: 'running' | 'completed';
+  results: ReviewedCandidate[];
+}> {
   try {
   if (!input.jobId?.trim()) {
     throw new Error('Select a target position.');
@@ -741,14 +760,56 @@ export async function startAtsReview(input: {
     }
   }
 
+  const generatedOnly = Boolean(input.attachGeneratedResumes) && !input.files?.length;
+
+  if (generatedOnly) {
+    const past = await getLatestResultsForJob(job.id);
+    if (past.length > 0) {
+      const sessionId = randomUUID();
+      const startedAt = Date.now();
+      createAtsSession({
+        sessionId,
+        jobId: job.id,
+        jobTitle: job.title,
+        startedAt,
+        clientIp: await getClientIp(),
+        progress: {
+          sessionId,
+          jobId: job.id,
+          jobTitle: job.title,
+          status: 'completed',
+          totalCandidates: past.length,
+          processedCount: past.length,
+          completedCount: past.length,
+          failedCount: 0,
+          candidates: past.map((candidate) => ({
+            candidateId: candidate.id,
+            candidateName: candidate.name,
+            fileName: candidate.fileName || `${candidate.name}.pdf`,
+            status: 'completed',
+            atsScore: candidate.atsScore,
+            tier: candidate.tier,
+          })),
+          elapsedTimeMs: 0,
+        },
+        results: past,
+      });
+      return { sessionId, status: 'completed', results: past };
+    }
+  }
+
   if (queue.length === 0) {
     throw new Error('Add at least one resume to start an AI review.');
   }
 
+  const skipLlm = generatedOnly;
   const clientIp = await getClientIp();
-  const quota = peekInferenceRateLimit(clientIp, false, queue.length);
-  if (!quota.allowed) {
-    throw new Error(quota.message || 'Too many AI reviews right now. Please wait and try again.');
+
+  if (!skipLlm) {
+    const quota = peekInferenceRateLimit(clientIp, false, queue.length);
+    if (!quota.allowed) {
+      throw new Error(quota.message || 'Too many AI reviews right now. Please wait and try again.');
+    }
   }
 
   const sessionId = randomUUID();
@@ -782,9 +843,21 @@ export async function startAtsReview(input: {
   });
 
   const jobInput = toJobInput(job);
+
+  if (skipLlm) {
+    await runAtsReview(sessionId, jobInput, queue, { skipLlm: true });
+    const session = getAtsSession(sessionId);
+    const results = getAtsSessionResults(sessionId);
+    return {
+      sessionId,
+      status: session?.progress.status === 'failed' ? 'running' : 'completed',
+      results,
+    };
+  }
+
   after(() => runAtsReview(sessionId, jobInput, queue));
 
-  return { sessionId };
+  return { sessionId, status: 'running', results: [] };
   } catch (err) {
     const raw = err instanceof Error ? err.message : '';
     if (
