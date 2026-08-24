@@ -1,0 +1,9 @@
+# Vercel upload exclusions — local-only files, never shipped
+.codegraph
+.omo
+.cursor
+data
+.env
+.env.*
+!.env.example
+tsconfig.tsbuildinfo

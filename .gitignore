@@ -54,3 +54,6 @@ AGENTS.md
 CLAUDE.md
 .omo/
 .cursor/
+.codegraph/
+.vercel
+.env*
