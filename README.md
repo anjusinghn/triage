@@ -24,21 +24,6 @@
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  UI["Browser · app/page.tsx"] --> SA["Server actions · ats-review.ts"]
-  SA --> RL["Rate limiter"]
-  SA --> Sess["In-memory review session"]
-  SA --> Eng["ATS engine"]
-  Eng --> PDF["pdf-parse"]
-  Eng --> Rules["Parseability / format / structure"]
-  Eng --> LLM["Server LLM"]
-  SA --> Repo["CandidateRepository"]
-  Repo --> PG[("PostgreSQL · Neon or local")]
-  Repo --> PR["ParsedResume"]
-  Sess --> UI
-```
-
 | Layer | Path | Responsibility |
 |---|---|---|
 | UI | `app/page.tsx`, `components/ats/` | Job CRUD, PDF upload, live progress, ranking, candidate detail |
