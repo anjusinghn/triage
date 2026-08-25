@@ -8,6 +8,10 @@
   <img src="https://img.shields.io/badge/PostgreSQL-336791?style=flat-square&logo=postgresql" alt="PostgreSQL" />
 </p>
 
+## 🎥 Demo Video
+
+[▶️ Watch the Smart Resume Screener Demo](https://drive.google.com/file/d/1COelK8SbDxhtkhTykUgI9NZG5LspyDSK/view?usp=sharing)
+
 **Smart Screener AI** screens PDF resumes against a target job requisition. Upload a batch, and the server extracts text, scores every candidate with a constrained LLM plus rule-based analyzers, and streams a ranked shortlist back to the dashboard.
 
 ## Features
