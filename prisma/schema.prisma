@@ -83,3 +83,10 @@ model Application {
   job       Job       @relation(fields: [jobId], references: [id])
   candidate Candidate @relation(fields: [candidateId], references: [id])
 }
+
+model RateLimitBucket {
+  id        String   @id
+  count     Int      @default(0)
+  resetAt   DateTime
+  updatedAt DateTime @updatedAt
+}

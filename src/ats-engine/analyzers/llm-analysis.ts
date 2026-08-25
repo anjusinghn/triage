@@ -52,6 +52,7 @@ Your output must match this exact schema:
  * Build analysis prompt
  */
 function buildPrompt(resumeText: string, job: JobInput): string {
+    const clipped = resumeText.length > 8000 ? resumeText.slice(0, 8000) : resumeText;
     return `Analyze this resume against the job:
 
 === JOB ===
@@ -65,7 +66,7 @@ Description:
 ${job.description}
 
 === RESUME ===
-${resumeText}
+${clipped}
 
 Output JSON only:`;
 }
@@ -106,7 +107,7 @@ async function analyzeWithOpenAI(
             { role: "user", content: buildPrompt(resumeText, job) },
         ],
         temperature: config.temperature ?? 0.1,
-        max_tokens: config.maxTokens ?? 2000,
+        max_tokens: config.maxTokens ?? 1200,
         response_format: { type: "json_object" },
     });
 
@@ -143,7 +144,7 @@ async function analyzeWithCustom(
             model: config.model,
             messages,
             temperature: config.temperature ?? 0.1,
-            max_tokens: config.maxTokens ?? 2000,
+            max_tokens: config.maxTokens ?? 1200,
             response_format: { type: "json_object" },
         });
 
@@ -157,7 +158,7 @@ async function analyzeWithCustom(
             model: config.model,
             messages,
             temperature: config.temperature ?? 0.1,
-            max_tokens: config.maxTokens ?? 2000,
+            max_tokens: config.maxTokens ?? 1200,
         });
 
         const content = response.choices[0]?.message?.content;

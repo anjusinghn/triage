@@ -14,7 +14,7 @@ export function getServerLLMConfig(): LLMConfig | undefined {
       baseURL: 'https://api.fireworks.ai/inference/v1',
       model: process.env.FIREWORKS_MODEL?.trim() || DEFAULT_FIREWORKS_MODEL,
       temperature: 0.1,
-      maxTokens: 2000,
+      maxTokens: 1200,
     });
   }
 
@@ -25,7 +25,7 @@ export function getServerLLMConfig(): LLMConfig | undefined {
       baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
       model: process.env.GOOGLE_GENERATIVE_AI_MODEL?.trim() || DEFAULT_GOOGLE_MODEL,
       temperature: 0.1,
-      maxTokens: 2000,
+      maxTokens: 1200,
     });
   }
 
@@ -40,8 +40,13 @@ export async function scoreResumeWithFireworks(args: {
   job: JobInput;
   clientIp?: string;
 }): Promise<ATSEngineOutput> {
+  const llmConfig = getServerLLMConfig();
+  if (!llmConfig) {
+    throw new Error('AI review is not configured.');
+  }
+
   const ip = args.clientIp?.trim() || '127.0.0.1';
-  const quota = checkInferenceRateLimit(ip, false, 1);
+  const quota = await checkInferenceRateLimit(ip, false, 1);
   if (!quota.allowed) {
     throw new Error(quota.message || 'Too many AI reviews right now. Please wait and try again.');
   }
@@ -58,12 +63,11 @@ export async function scoreResumeWithFireworks(args: {
         resumeFileName: args.resumeFileName,
       },
       job: args.job,
-      llmConfig: getServerLLMConfig(),
+      llmConfig,
     })
   );
 }
 
-/** Deterministic ATS score from resume text. No network, no rate limit. */
 export async function scoreResumeLocally(args: {
   candidateName: string;
   email?: string;

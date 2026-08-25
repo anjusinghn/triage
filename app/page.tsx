@@ -34,9 +34,11 @@ import {
   startAtsReview,
   getAtsReviewProgress,
   getAtsReviewResults,
-  getLatestResultsForJob,
   listPastShortlistedScans,
+  getReviewSecurityState,
+  submitReviewAccessCode,
 } from '@/src/actions/ats-review';
+import { Input } from '@/components/ui/input';
 import {
   AIReviewerHeroHeader,
   ReviewStatsCards,
@@ -77,7 +79,7 @@ const GENERATED_RESUME_CAP = 30;
 
 function publicClientError(err: unknown, fallback: string): string {
   const message = err instanceof Error ? err.message : fallback;
-  if (/fireworks|gemini|google|anthropic|groq|openrouter|openai/i.test(message)) {
+  if (/fireworks|gemini|google|anthropic|groq|openrouter|openai|api[_-]?key|bearer|sk-|fw_/i.test(message)) {
     return fallback;
   }
   return message;
@@ -116,6 +118,10 @@ export default function AIReviewerPage() {
   const [showPastScans, setShowPastScans] = useState(false);
   const [pastScans, setPastScans] = useState<PastScan[]>([]);
   const [pastScansLoading, setPastScansLoading] = useState(false);
+  const [gateEnabled, setGateEnabled] = useState(false);
+  const [gateUnlocked, setGateUnlocked] = useState(true);
+  const [accessCode, setAccessCode] = useState('');
+  const [unlocking, setUnlocking] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedJob = useMemo(
@@ -133,9 +139,10 @@ export default function AIReviewerPage() {
 
     async function load() {
       try {
-        const [jobList, generated] = await Promise.all([
+        const [jobList, generated, security] = await Promise.all([
           getAtsJobs(),
           listGeneratedResumes(),
+          getReviewSecurityState(),
         ]);
         if (cancelled) return;
         setJobs(jobList);
@@ -146,6 +153,8 @@ export default function AIReviewerPage() {
         );
         setGeneratedCount(Math.min(generated.count, GENERATED_RESUME_CAP));
         setGeneratedPreviews(generated.previews);
+        setGateEnabled(security.gateEnabled);
+        setGateUnlocked(security.unlocked);
       } catch (err) {
         if (cancelled) return;
         const message = publicClientError(err, 'Failed to load ATS jobs.');
@@ -174,11 +183,11 @@ export default function AIReviewerPage() {
           setLiveProgress(next);
 
           if (next.status === 'completed') {
-            const sessionResults = await getAtsReviewResults(sessionId);
-            const results =
-              sessionResults.length > 0
-                ? sessionResults
-                : await getLatestResultsForJob(selectedJobId);
+            if (next.totalCandidates > 0 && next.processedCount < next.totalCandidates) {
+              timeoutId = setTimeout(poll, 400);
+              return;
+            }
+            const results = await getAtsReviewResults(sessionId);
             if (cancelled) return;
             setReviewedCandidates(results);
             setHasReviewed(true);
@@ -199,7 +208,7 @@ export default function AIReviewerPage() {
       }
 
       if (!cancelled) {
-        timeoutId = setTimeout(poll, 800);
+        timeoutId = setTimeout(poll, 400);
       }
     };
 
@@ -209,7 +218,7 @@ export default function AIReviewerPage() {
       cancelled = true;
       if (timeoutId) clearTimeout(timeoutId);
     };
-  }, [sessionId, isReviewing, selectedJobId]);
+  }, [sessionId, isReviewing]);
 
   const filteredCandidates = useMemo(() => {
     if (filterTier === 'all') return reviewedCandidates;
@@ -311,17 +320,20 @@ export default function AIReviewerPage() {
           files: opts.extraFiles && opts.extraFiles.length > 0 ? opts.extraFiles : undefined,
         });
         setSessionId(started.sessionId);
-        if (started.status === 'running') {
-          setIsReviewing(true);
-          return;
-        }
-        if (started.status === 'completed' && started.results.length > 0) {
-          setReviewedCandidates(started.results);
-          setHasReviewed(true);
-          setIsReviewing(false);
-          setLiveProgress(null);
-          return;
-        }
+        setReviewedCandidates([]);
+        setHasReviewed(false);
+        setLiveProgress({
+          sessionId: started.sessionId,
+          jobId: selectedJobId,
+          jobTitle: '',
+          status: 'running',
+          totalCandidates: resumeCount,
+          processedCount: 0,
+          completedCount: 0,
+          failedCount: 0,
+          candidates: [],
+          elapsedTimeMs: 0,
+        });
         setIsReviewing(true);
       } catch (err) {
         const message = publicClientError(err, 'Failed to start review.');
@@ -331,7 +343,7 @@ export default function AIReviewerPage() {
         setStartingReview(false);
       }
     },
-    [selectedJobId]
+    [selectedJobId, resumeCount]
   );
 
   const handleUseExistingResumes = useCallback(async () => {
@@ -352,17 +364,22 @@ export default function AIReviewerPage() {
   }, []);
 
   const handleFilesAdded = useCallback((incoming: FileList | File[]) => {
-    const valid = Array.from(incoming).filter(isPdfFile);
+    const valid = Array.from(incoming).filter((file) => {
+      if (!isPdfFile(file)) return false;
+      if (file.size > 2 * 1024 * 1024) return false;
+      return true;
+    });
     if (valid.length === 0) {
-      setErrorMessage('Please upload valid PDF resume files.');
+      setErrorMessage('Please upload PDF resumes of 2 MB or smaller.');
       return;
     }
     setFiles((prev) => {
       const combined = [...prev, ...valid];
-      return combined.filter(
+      const unique = combined.filter(
         (file, idx, self) =>
           idx === self.findIndex((other) => other.name === file.name && other.size === file.size)
       );
+      return unique.slice(0, 5);
     });
     setErrorMessage(null);
   }, []);
@@ -376,11 +393,15 @@ export default function AIReviewerPage() {
       setErrorMessage('Drop or select PDF files first, or use the existing 30 resumes.');
       return;
     }
+    if (files.length > 0 && gateEnabled && !gateUnlocked) {
+      setErrorMessage('Enter the access code to run AI review on uploaded PDFs.');
+      return;
+    }
     await beginReview({
       useExistingResumes: attachGeneratedResumes,
       extraFiles: files.length > 0 ? files : undefined,
     });
-  }, [attachGeneratedResumes, beginReview, canStartReview, files]);
+  }, [attachGeneratedResumes, beginReview, canStartReview, files, gateEnabled, gateUnlocked]);
 
   const toggleSort = useCallback(
     (field: SortField) => {
@@ -463,6 +484,41 @@ export default function AIReviewerPage() {
               Dismiss
             </Button>
           </div>
+        )}
+
+        {gateEnabled && !gateUnlocked && (
+          <form
+            className="flex flex-col gap-3 rounded-xl border border-neutral-200 bg-white px-4 py-3 sm:flex-row sm:items-center"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              setUnlocking(true);
+              setErrorMessage(null);
+              try {
+                await submitReviewAccessCode(accessCode);
+                setGateUnlocked(true);
+                setAccessCode('');
+              } catch (err) {
+                setErrorMessage(publicClientError(err, 'That access code is incorrect.'));
+              } finally {
+                setUnlocking(false);
+              }
+            }}
+          >
+            <p className="flex-1 text-sm text-neutral-600">
+              Enter the access code to run AI review on uploaded PDFs.
+            </p>
+            <Input
+              type="password"
+              autoComplete="off"
+              value={accessCode}
+              onChange={(event) => setAccessCode(event.target.value)}
+              placeholder="Access code"
+              className="h-10 sm:w-48"
+            />
+            <Button type="submit" disabled={unlocking || !accessCode.trim()} className="h-10">
+              {unlocking ? 'Checking…' : 'Unlock'}
+            </Button>
+          </form>
         )}
 
         <div className="rounded-xl border border-neutral-300 bg-gray-100 p-6 shadow-sm">

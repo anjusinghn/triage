@@ -1,15 +1,26 @@
 'use server';
 
 import { after } from 'next/server';
-import { headers } from 'next/headers';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { prisma } from '@/lib/prisma';
-import { scoreResumeWithFireworks, scoreResumeLocally, createJobInput } from '@/lib/ats-engine';
+import { scoreResumeWithFireworks, scoreResumeLocally, createJobInput, getServerLLMConfig } from '@/lib/ats-engine';
 import { parseResume, getRecommendedAction } from '@/src/ats-engine/index';
 import type { ATSEngineOutput, DecisionBand, JobInput } from '@/src/ats-engine/index';
-import { peekInferenceRateLimit } from '@/lib/rate-limiter';
+import {
+  peekInferenceRateLimit,
+  checkReviewStartRateLimit,
+  MAX_REVIEW_FILES,
+  MAX_RESUME_BYTES,
+} from '@/lib/rate-limiter';
+import {
+  assertTrustedRequest,
+  getClientIp,
+  isPdfBuffer,
+  publicSafeError,
+} from '@/lib/request-guard';
+import { isReviewGateEnabled, isReviewGateUnlocked, unlockReviewGate } from '@/lib/review-gate';
 import {
   createAtsSession,
   getAtsSession,
@@ -32,30 +43,24 @@ import { selectShortlisted } from '@/lib/ats-shortlist';
 
 const GENERATED_RESUMES_DIR = path.join(process.cwd(), 'data', 'generated-resumes');
 
-async function getClientIp(): Promise<string> {
-  try {
-    const headerList = await headers();
-    const forwarded = headerList.get('x-forwarded-for');
-    if (forwarded) {
-      return forwarded.split(',')[0].trim() || '127.0.0.1';
-    }
-    const realIp = headerList.get('x-real-ip');
-    if (realIp) return realIp.trim();
-    return '127.0.0.1';
-  } catch {
-    return '127.0.0.1';
-  }
+function publicInferenceError(err: unknown): string {
+  return publicSafeError(err, 'AI review failed for this resume. Please try again.');
 }
 
-function publicInferenceError(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
-  if (/too many|rate|quota|429/i.test(raw)) {
-    return 'Too many AI reviews right now. Please wait and try again.';
+export async function getReviewSecurityState(): Promise<{ gateEnabled: boolean; unlocked: boolean }> {
+  return {
+    gateEnabled: isReviewGateEnabled(),
+    unlocked: await isReviewGateUnlocked(),
+  };
+}
+
+export async function submitReviewAccessCode(code: string): Promise<{ ok: boolean }> {
+  await assertTrustedRequest();
+  const ok = await unlockReviewGate(code);
+  if (!ok) {
+    throw new Error('That access code is incorrect.');
   }
-  if (/could not save/i.test(raw)) {
-    return raw;
-  }
-  return 'AI review failed for this resume. Please try again.';
+  return { ok: true };
 }
 
 interface QueuedResume {
@@ -63,7 +68,14 @@ interface QueuedResume {
   fileName: string;
   diskPath?: string;
   buffer?: Buffer;
+  extractedText?: string;
   resumeUrl?: string | null;
+}
+
+const GENERATED_POOL_TICK_MS = 400;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function hashResumeBytes(buffer: Buffer): string {
@@ -226,6 +238,97 @@ async function listGeneratedPdfFileNames(): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+function pushUniqueQueuedResume(unique: Map<string, QueuedResume>, item: QueuedResume): boolean {
+  const key = item.fileName.toLowerCase();
+  if (unique.has(key)) return false;
+  unique.set(key, item);
+  return true;
+}
+
+/** Production often has no PDFs on disk. Score from stored ParsedResume text instead. */
+async function listStoredGeneratedResumes(): Promise<QueuedResume[]> {
+  const unique = new Map<string, QueuedResume>();
+
+  try {
+    const parsed = await prisma.parsedResume.findMany({
+      where: { extractedText: { not: '' } },
+      include: { candidate: { select: { resumeUrl: true } } },
+      orderBy: [{ fileName: 'asc' }, { updatedAt: 'desc' }],
+      take: 200,
+    });
+    const ranked = [...parsed].sort((a, b) => {
+      const rank = (row: (typeof parsed)[number]) =>
+        (row.source === 'generated' ? 2 : 0) + (/^resume_\d+_/i.test(row.fileName) ? 1 : 0);
+      const diff = rank(b) - rank(a);
+      if (diff !== 0) return diff;
+      return a.fileName.localeCompare(b.fileName, undefined, { numeric: true });
+    });
+    for (const row of ranked) {
+      if (unique.size >= GENERATED_RESUME_LIMIT) break;
+      if (!row.extractedText.trim()) continue;
+      pushUniqueQueuedResume(unique, {
+        candidateId: row.candidateId,
+        fileName: row.fileName,
+        extractedText: row.extractedText,
+        resumeUrl: row.candidate.resumeUrl,
+      });
+    }
+  } catch (err) {
+    console.warn('Failed to load stored generated resumes:', err);
+  }
+
+  if (unique.size < GENERATED_RESUME_LIMIT) {
+    try {
+      const applications = await prisma.application.findMany({
+        include: {
+          candidate: {
+            include: {
+              parsedResumes: { orderBy: { updatedAt: 'desc' } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'asc' },
+        take: 100,
+      });
+      for (const application of applications) {
+        if (unique.size >= GENERATED_RESUME_LIMIT) break;
+        const parsedResume =
+          application.candidate.parsedResumes.find((item) => item.fileName === application.fileName) ??
+          application.candidate.parsedResumes[0];
+        const extractedText =
+          parsedResume?.extractedText?.trim() ||
+          application.aiSummary?.trim() ||
+          application.justification?.trim() ||
+          '';
+        if (!extractedText) continue;
+        const fileName =
+          application.fileName ||
+          parsedResume?.fileName ||
+          `${application.candidate.name.replace(/\s+/g, '_')}.pdf`;
+        pushUniqueQueuedResume(unique, {
+          candidateId: application.candidateId,
+          fileName,
+          extractedText,
+          resumeUrl: application.candidate.resumeUrl,
+        });
+      }
+    } catch (err) {
+      console.warn('Failed to load application resume text for generated pool:', err);
+    }
+  }
+
+  return [...unique.values()]
+    .sort((a, b) => a.fileName.localeCompare(b.fileName, undefined, { numeric: true }))
+    .slice(0, GENERATED_RESUME_LIMIT);
+}
+
+async function listGeneratedPoolFileNames(): Promise<string[]> {
+  const fromDisk = await listGeneratedPdfFileNames();
+  if (fromDisk.length > 0) return fromDisk;
+  const stored = await listStoredGeneratedResumes();
+  return stored.map((item) => item.fileName);
 }
 
 function readExperienceBlob(value: unknown): {
@@ -499,18 +602,25 @@ async function processQueuedResume(
     step: 'Running ATS analysis',
   };
 
+  const tickStarted = Date.now();
+
   try {
+    const fromText = Boolean(item.extractedText?.trim()) && !item.buffer && !item.diskPath;
     const resumeBuffer =
-      item.buffer ?? (item.diskPath ? await readFile(item.diskPath) : undefined);
+      item.buffer ??
+      (item.diskPath ? await readFile(item.diskPath) : undefined) ??
+      (fromText ? Buffer.from(item.extractedText as string, 'utf8') : undefined);
     if (!resumeBuffer) {
       throw new Error(`Resume bytes missing for ${item.fileName}`);
     }
 
+    const resumeMimeType = fromText ? 'text/plain' : 'application/pdf';
     const output = options?.skipLlm
       ? await scoreResumeLocally({
           candidateName: fallbackName,
           resumeBuffer,
           resumeFileName: item.fileName,
+          resumeMimeType,
           job: jobInput,
         })
       : await scoreResumeWithFireworks({
@@ -530,9 +640,9 @@ async function processQueuedResume(
     reviewed = await persistReviewedCandidate(session.jobId, reviewed, {
       resumeUrl: item.resumeUrl,
       contentHash: hashResumeBytes(resumeBuffer),
-      extractedText: output.extractedText || '',
+      extractedText: output.extractedText || item.extractedText || '',
       normalizedText: output.normalizedText || null,
-      source: item.diskPath ? 'generated' : 'upload',
+      source: item.diskPath || fromText ? 'generated' : 'upload',
       jobTitle: session.jobTitle,
     });
 
@@ -568,6 +678,10 @@ async function processQueuedResume(
   } finally {
     session.progress.processedCount += 1;
     session.progress.elapsedTimeMs = Date.now() - session.startedAt;
+    if (options?.skipLlm) {
+      const wait = GENERATED_POOL_TICK_MS - (Date.now() - tickStarted);
+      if (wait > 0) await sleep(wait);
+    }
   }
 }
 
@@ -735,7 +849,7 @@ export async function listGeneratedResumes(): Promise<{
   count: number;
   previews: Array<{ fileName: string; displayName: string }>;
 }> {
-  const fileNames = await listGeneratedPdfFileNames();
+  const fileNames = await listGeneratedPoolFileNames();
   return {
     fileName: 'data/generated-resumes/*.pdf',
     count: fileNames.length,
@@ -756,6 +870,8 @@ export async function startAtsReview(input: {
   results: ReviewedCandidate[];
 }> {
   try {
+  await assertTrustedRequest();
+
   if (!input.jobId?.trim()) {
     throw new Error('Select a target position.');
   }
@@ -770,31 +886,52 @@ export async function startAtsReview(input: {
 
   if (input.attachGeneratedResumes) {
     const generated = await listGeneratedPdfFileNames();
-    for (const fileName of generated) {
-      const key = fileName.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      queue.push({
-        candidateId: randomUUID(),
-        fileName,
-        diskPath: path.join(GENERATED_RESUMES_DIR, fileName),
-        resumeUrl: path.join('data', 'generated-resumes', fileName),
-      });
+    if (generated.length > 0) {
+      for (const fileName of generated) {
+        const key = fileName.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        queue.push({
+          candidateId: randomUUID(),
+          fileName,
+          diskPath: path.join(GENERATED_RESUMES_DIR, fileName),
+          resumeUrl: path.join('data', 'generated-resumes', fileName),
+        });
+      }
+    } else {
+      const stored = await listStoredGeneratedResumes();
+      for (const item of stored) {
+        const key = item.fileName.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        queue.push(item);
+      }
     }
   }
 
   if (input.files?.length) {
+    if (input.files.length > MAX_REVIEW_FILES) {
+      throw new Error(`Upload at most ${MAX_REVIEW_FILES} PDF files at a time.`);
+    }
     for (const file of input.files) {
       if (!file || typeof file.arrayBuffer !== 'function') continue;
-      if (!isPdfFileName(file.name) && file.type !== 'application/pdf') continue;
+      if (!isPdfFileName(file.name) && file.type !== 'application/pdf') {
+        throw new Error('Only PDF resumes are accepted.');
+      }
       const key = file.name.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
       const buffer = Buffer.from(await file.arrayBuffer());
       if (buffer.length === 0) continue;
+      if (buffer.length > MAX_RESUME_BYTES) {
+        throw new Error('Each PDF must be 2 MB or smaller.');
+      }
+      if (!isPdfBuffer(buffer)) {
+        throw new Error('Only PDF resumes are accepted.');
+      }
       queue.push({
         candidateId: randomUUID(),
-        fileName: file.name,
+        fileName: file.name.replace(/[^\w.\- ()[\]]+/g, '_').slice(0, 180),
         buffer,
         resumeUrl: null,
       });
@@ -804,41 +941,6 @@ export async function startAtsReview(input: {
   const generatedOnly = Boolean(input.attachGeneratedResumes) && !input.files?.length;
 
   if (queue.length === 0) {
-    if (generatedOnly) {
-      const past = await getLatestResultsForJob(job.id);
-      if (past.length > 0) {
-        const sessionId = randomUUID();
-        const startedAt = Date.now();
-        createAtsSession({
-          sessionId,
-          jobId: job.id,
-          jobTitle: job.title,
-          startedAt,
-          clientIp: await getClientIp(),
-          progress: {
-            sessionId,
-            jobId: job.id,
-            jobTitle: job.title,
-            status: 'completed',
-            totalCandidates: past.length,
-            processedCount: past.length,
-            completedCount: past.length,
-            failedCount: 0,
-            candidates: past.map((candidate) => ({
-              candidateId: candidate.id,
-              candidateName: candidate.name,
-              fileName: candidate.fileName || `${candidate.name}.pdf`,
-              status: 'completed',
-              atsScore: candidate.atsScore,
-              tier: candidate.tier,
-            })),
-            elapsedTimeMs: 0,
-          },
-          results: past,
-        });
-        return { sessionId, status: 'completed', results: past };
-      }
-    }
     throw new Error('Add at least one resume to start an AI review.');
   }
 
@@ -846,7 +948,17 @@ export async function startAtsReview(input: {
   const clientIp = await getClientIp();
 
   if (!skipLlm) {
-    const quota = peekInferenceRateLimit(clientIp, false, queue.length);
+    if (!(await isReviewGateUnlocked())) {
+      throw new Error('Enter the access code to run AI review.');
+    }
+    if (!getServerLLMConfig()) {
+      throw new Error('AI review is not configured.');
+    }
+    const startQuota = await checkReviewStartRateLimit(clientIp);
+    if (!startQuota.allowed) {
+      throw new Error(startQuota.message || 'Too many AI reviews right now. Please wait and try again.');
+    }
+    const quota = await peekInferenceRateLimit(clientIp, false, queue.length);
     if (!quota.allowed) {
       throw new Error(quota.message || 'Too many AI reviews right now. Please wait and try again.');
     }
@@ -892,19 +1004,7 @@ export async function startAtsReview(input: {
 
   return { sessionId, status: 'running', results: [] };
   } catch (err) {
-    const raw = err instanceof Error ? err.message : '';
-    if (
-      raw.startsWith('Select ') ||
-      raw.startsWith('Add at least') ||
-      raw.startsWith('Enter a') ||
-      raw.startsWith('Keep at least') ||
-      raw.startsWith('Position not found') ||
-      raw.startsWith('Job not found') ||
-      raw.startsWith('Too many')
-    ) {
-      throw err;
-    }
-    throw new Error('Could not start AI review. Please try again.');
+    throw new Error(publicSafeError(err, 'Could not start AI review. Please try again.'));
   }
 }
 

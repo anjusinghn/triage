@@ -49,11 +49,18 @@ Thumbs.db
 # local demo resumes (not shipped; clone separately if needed)
 /data/generated-resumes
 
-# generated / local agent noise
+# generated / local agent noise — never commit AI, agent, or planning files
 AGENTS.md
 CLAUDE.md
 .omo/
 .cursor/
 .codegraph/
-.vercel
-.env*
+CONTEXT.md
+docs/
+*.excalidraw
+*.excalidrawlib
+PLAN*.md
+ROADMAP*.md
+SPEC*.md
+NOTES*.md
+todo*.md

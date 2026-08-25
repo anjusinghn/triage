@@ -344,7 +344,7 @@ export async function scoreCandidate(input: ATSEngineInput): Promise<ATSEngineOu
             llmUsed = !shouldRejectLLMOutput(llmOutput);
         } catch (error) {
             // Log but don't throw - fall back to rule-based scoring
-            console.warn("LLM analysis failed:", error);
+            console.warn("LLM analysis failed");
             llmOutput = null;
 
             // If error is already an ATSError, rethrow if strict mode
