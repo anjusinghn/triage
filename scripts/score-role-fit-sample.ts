@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createJobInput, scoreCandidate } from '../src/ats-engine/index';
+import type { JobInput } from '../src/ats-engine/types';
 
 const dir = path.join(process.cwd(), 'data', 'generated-resumes');
 
@@ -26,7 +27,7 @@ const frontend = createJobInput(
   { requiredExperienceYears: 4 }
 );
 
-async function scoreFile(fileName, job) {
+async function scoreFile(fileName: string, job: JobInput) {
   const buffer = await readFile(path.join(dir, fileName));
   const out = await scoreCandidate({
     candidate: {
