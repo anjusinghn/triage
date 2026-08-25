@@ -87,7 +87,7 @@ function publicClientError(err: unknown, fallback: string): string {
 
 export default function AIReviewerPage() {
   const [selectedJobId, setSelectedJobId] = useState('');
-  const [positionEditorMode, setPositionEditorMode] = useState<'view' | 'edit' | 'create'>('view');
+  const [positionEditorMode, setPositionEditorMode] = useState<'view' | 'edit'>('view');
   const [jobs, setJobs] = useState<ATSJobPosting[]>([]);
   const [generatedCount, setGeneratedCount] = useState(GENERATED_RESUME_CAP);
   const [generatedPreviews, setGeneratedPreviews] = useState<
@@ -129,11 +129,6 @@ export default function AIReviewerPage() {
     [jobs, selectedJobId]
   );
 
-  const jobSelectItems = useMemo(
-    () => Object.fromEntries(jobs.map((job) => [job.id, job.title])),
-    [jobs]
-  );
-
   useEffect(() => {
     let cancelled = false;
 
@@ -146,11 +141,7 @@ export default function AIReviewerPage() {
         ]);
         if (cancelled) return;
         setJobs(jobList);
-        setSelectedJobId((current) =>
-          current && jobList.some((job) => job.id === current)
-            ? current
-            : pickDefaultJobId(jobList)
-        );
+        setSelectedJobId(pickDefaultJobId(jobList));
         setGeneratedCount(Math.min(generated.count, GENERATED_RESUME_CAP));
         setGeneratedPreviews(generated.previews);
         setGateEnabled(security.gateEnabled);
@@ -271,18 +262,6 @@ export default function AIReviewerPage() {
   const canStartReview =
     Boolean(selectedJobId) && (files.length > 0 || attachGeneratedResumes);
   const resumeCount = files.length + (attachGeneratedResumes ? generatedCount : 0);
-
-  const handleRoleChange = useCallback((value: string | null) => {
-    if (!value) return;
-    setSelectedJobId(value);
-    setPositionEditorMode('view');
-    setSessionId(null);
-    setLiveProgress(null);
-    setIsReviewing(false);
-    setHasReviewed(false);
-    setReviewedCandidates([]);
-    setAttachGeneratedResumes(false);
-  }, []);
 
   const handlePositionSaved = useCallback((job: ATSJobPosting) => {
     setJobs((prev) => {
@@ -528,35 +507,8 @@ export default function AIReviewerPage() {
                 <label className="mb-2 block text-sm font-medium text-neutral-700">
                   Target position
                 </label>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Select
-                    value={selectedJobId}
-                    onValueChange={handleRoleChange}
-                    items={jobSelectItems}
-                    disabled={jobs.length === 0 || isReviewing || startingReview}
-                  >
-                    <SelectTrigger className="h-11 w-[280px] rounded-xl bg-white">
-                      <SelectValue placeholder="Select position">
-                        {selectedJob?.title ?? 'Select position'}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {jobs.map((job) => (
-                        <SelectItem key={job.id} value={job.id}>
-                          {job.title}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="h-11 rounded-xl"
-                    onClick={() => setPositionEditorMode('create')}
-                    disabled={isReviewing || startingReview}
-                  >
-                    Add
-                  </Button>
+                <div className="flex h-11 w-[280px] items-center rounded-xl border border-neutral-200 bg-white px-3 text-sm font-medium text-neutral-900">
+                  {selectedJob?.title ?? 'Senior Full Stack Engineer'}
                 </div>
               </div>
 
@@ -637,21 +589,11 @@ export default function AIReviewerPage() {
             </Button>
           </div>
 
-          {positionEditorMode === 'create' && (
-            <JobPositionEditor
-              key="new-position"
-              job={null}
-              canDelete={false}
-              onCancel={() => setPositionEditorMode('view')}
-              onSaved={handlePositionSaved}
-              onDeleted={handlePositionDeleted}
-            />
-          )}
           {positionEditorMode === 'edit' && selectedJob && (
             <JobPositionEditor
               key={selectedJob.id}
               job={selectedJob}
-              canDelete={jobs.length > 1}
+              canDelete={false}
               onCancel={() => setPositionEditorMode('view')}
               onSaved={handlePositionSaved}
               onDeleted={handlePositionDeleted}

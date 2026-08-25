@@ -778,18 +778,8 @@ export async function getAtsJobs(): Promise<ATSJobPosting[]> {
   return sortJobPostings(jobs.map(mapJobToPosting));
 }
 
-export async function createAtsJob(input: ATSJobWriteInput): Promise<ATSJobPosting> {
-  try {
-    const data = normalizeJobWrite(input);
-    const job = await candidateRepository.createJob(data);
-    return mapJobToPosting(job);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : '';
-    if (message.startsWith('Enter a') || message.startsWith('Add at least')) {
-      throw err;
-    }
-    throw new Error('Could not save this position.');
-  }
+export async function createAtsJob(_input: ATSJobWriteInput): Promise<ATSJobPosting> {
+  throw new Error('Target positions cannot be added.');
 }
 
 export async function updateAtsJob(
