@@ -1,12 +1,26 @@
-# Triage — ATS AI Reviewer
+# Smart Screener AI
 
-🔗 **Live demo:** https://unthinkable-triage.vercel.app
+<p align="center">
+  <em>AI-powered resume screening, done right.</em>
+</p>
 
-Production ATS for screening PDF resumes against a job requisition. The browser uploads resumes; the server extracts text, scores each candidate with a constrained LLM plus rule-based analyzers, persists results, and streams ranking back to the dashboard.
+<p align="center">
+  <img src="https://img.shields.io/badge/Next.js%2016-black?style=flat-square&logo=next.js" alt="Next.js 16" />
+  <img src="https://img.shields.io/badge/React%2019-61dafb?style=flat-square&logo=react" alt="React 19" />
+  <img src="https://img.shields.io/badge/TypeScript-3178c6?style=flat-square&logo=typescript" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/Prisma-2d3748?style=flat-square&logo=prisma" alt="Prisma" />
+  <img src="https://img.shields.io/badge/PostgreSQL-336791?style=flat-square&logo=postgresql" alt="PostgreSQL" />
+</p>
 
-**Stack:** Next.js 16 · React 19 · TypeScript · Prisma 7 (PostgreSQL) · OpenAI-compatible LLM
+**Smart Screener AI** screens PDF resumes against a target job requisition. Upload a batch, and the server extracts text, scores every candidate with a constrained LLM plus rule-based analyzers, and streams a ranked shortlist back to the dashboard.
 
----
+## Features
+
+- **Bulk screening** — drop a folder of PDFs and get a ranked shortlist in seconds
+- **Explainable scores** — every 0–100 score breaks down by skills, experience, resume quality, and fit
+- **Strict honesty** — the LLM only credits skills explicitly written on the resume
+- **Decision tiers** — `top` / `qualified` / `maybe` / `unqualified` / `rejected`
+- **Private by design** — provider keys live on the server, never in the browser
 
 ## Architecture
 
@@ -29,7 +43,7 @@ flowchart LR
 |---|---|---|
 | UI | `app/page.tsx`, `components/ats/` | Job CRUD, PDF upload, live progress, ranking, candidate detail |
 | Server actions | `src/actions/ats-review.ts` | Queue resumes, run scoring in `after()`, poll progress |
-| Session | `lib/ats-session.ts` | In-memory `Map` for the in-flight batch (not persisted) |
+| Session | `lib/ats-session.ts` | In-memory `Map` for the in-flight batch |
 | Engine adapter | `lib/ats-engine.ts` | Server LLM config + per-resume quota |
 | Scoring engine | `src/ats-engine/` | Extract → analyze → validate → weighted score → decision band |
 | Persistence | `src/repositories/candidate.repository.ts` | Candidate, application, and parsed-resume writes |
@@ -41,9 +55,9 @@ Credentials never leave the server. Provider keys are configured in `.env` (see 
 
 1. Recruiter picks a job, attaches PDFs (or uses local `data/generated-resumes`).
 2. `startAtsReview` peeks the IP quota, creates a session, then `after()` scores every resume in parallel.
-3. Each resume: extract text → rule analyzers → LLM JSON → verify claimed skills against resume text → weighted 0–100 score.
-4. Result is mapped to a UI tier. Postgres stores the **application** (score for that job) and a **parsed resume** (extracted text + structured parse, keyed by SHA-256 of the file bytes). Writes fall back in-memory if the DB is down.
-5. The client polls `getAtsReviewProgress` every 800ms, then loads the ranked roster. Reloaded results read extracted text from `ParsedResume`, not from the score summary.
+3. Each resume: extract text → rule analyzers → LLM JSON → verify claimed skills → weighted 0–100 score.
+4. The result is mapped to a UI tier. Postgres stores the **application** (score for that job) and a **parsed resume** (extracted text, keyed by SHA-256 of the file bytes). Writes fall back in-memory if the DB is down.
+5. The client polls `getAtsReviewProgress` every 800ms, then loads the ranked roster.
 
 ### Scoring (screening defaults)
 
@@ -59,149 +73,6 @@ Credentials never leave the server. Provider keys are configured in `.env` (see 
 Penalties cap at 30 points (missing must-have skills, experience gap, seniority mismatch, poor ATS format). Decision bands: **≥85** strong · **≥70** good · **≥55** moderate · else no match. UI tiers: `top` / `qualified` / `maybe` / `unqualified` / `rejected`.
 
 Rate limits (production, per IP): 10 / 10 min, 30 / hour, 80 / day. Concurrency 1; 400ms minimum between inferences.
-
----
-
-## System prompt
-
-The production analyzer lives in `src/ats-engine/analyzers/llm-analysis.ts`. Temperature `0.1`, `max_tokens` 2000, `response_format: json_object`. Skills that are not explicit in the resume are dropped after the model returns.
-
-```
-system prompt = `You are an ATS (Applicant Tracking System) analyzer. Analyze resumes against job descriptions.
-
-RULES:
-1. Only identify skills that are EXPLICITLY mentioned in the resume
-2. Do NOT infer or assume skills not stated
-3. Be conservative with scores
-4. Provide evidence quotes for skills found
-5. Output ONLY valid JSON
-
-Your output must match this exact schema:
-{
-  "semanticScore": <0-100>,
-  "skillsMatch": ["<skill1>", "<skill2>"],
-  "experienceAlignment": <0-100>,
-  "keyFindings": {
-    "strengths": ["..."],
-    "gaps": ["..."],
-    "risks": ["..."]
-  },
-  "skillsAnalysis": {
-    "matched": ["<skill with evidence>"],
-    "missing": ["<required but not found>"],
-    "inferred": ["<possibly has>"]
-  },
-  "experienceAnalysis": {
-    "totalYears": <number>,
-    "relevantYears": <number>,
-    "highlights": ["..."]
-  },
-  "educationAnalysis": {
-    "level": "<high school|bachelors|masters|phd|other>",
-    "relevance": <0-100>,
-    "details": "<field of study>"
-  },
-  "confidence": <0-1>,
-  "reasoning": "<brief explanation>"
-}`
-```
-
-User message (per resume):
-
-```
-user prompt = `Analyze this resume against the job:
-
-=== JOB ===
-Title: ${job.title}
-Required Skills: ${job.mustHaveSkills.join(", ")}
-Nice-to-have: ${job.niceToHaveSkills.join(", ")}
-Experience Required: ${job.requiredExperienceYears} years
-Level: ${job.experienceLevel}
-
-Description:
-${job.description}
-
-=== RESUME ===
-${resumeText}
-
-Output JSON only:`
-```
-
-If the model’s `confidence` is below 0.3, the engine discards the LLM output and scores from rule-based baselines instead.
-
----
-
-## Data model
-
-```prisma
-model Job {
-  id                      String   @id @default(uuid())
-  title                   String
-  description             String
-  slug                    String   @unique
-  mustHaveSkills          String[]
-  niceToHaveSkills        String[]
-  requiredExperienceYears Int
-  department              String
-  location                String
-  locationType            String
-  employmentType          String
-  salaryMin               Int
-  salaryMax               Int
-  applicants              Application[]
-}
-
-model Candidate {
-  id            String         @id @default(uuid())
-  name          String
-  email         String?
-  resumeUrl     String?
-  skills        String[]
-  experience    Json?
-  education     Json?
-  applications  Application[]
-  parsedResumes ParsedResume[]
-}
-
-model ParsedResume {
-  id                   String   @id @default(uuid())
-  candidateId          String
-  contentHash          String   @unique
-  fileName             String
-  mimeType             String
-  extractedText        String
-  normalizedText       String?
-  skills               Json
-  workExperience       Json
-  education            Json
-  totalYearsExperience Int
-  highestSeniority     String?
-  source               String
-  candidate            Candidate @relation(...)
-}
-
-model Application {
-  id                String   @id @default(uuid())
-  jobId             String
-  candidateId       String
-  matchScore        Int
-  justification     String
-  tier              String
-  skillMatch        Int
-  experienceMatch   Int
-  domainFit         Int
-  semanticFit       Int
-  strengths         String[]
-  concerns          String[]
-  recommendedAction String
-  aiSummary         String?
-  fileName          String?
-  job               Job       @relation(...)
-  candidate         Candidate @relation(...)
-}
-```
-
----
 
 ## Local setup
 
@@ -229,9 +100,9 @@ npx prisma db push
 npx prisma db seed
 ```
 
-The `pg` pool enables TLS automatically for `*.neon.tech` and any URL with `sslmode=require`. After you send the Neon URL it can replace the local Docker database without code changes.
+The `pg` pool enables TLS automatically for `*.neon.tech` and any URL with `sslmode=require`.
 
-Demo PDFs are gitignored. To use “existing resumes” locally, clone them into `data/generated-resumes/`.
+Demo PDFs are gitignored. To use "existing resumes" locally, clone them into `data/generated-resumes/`.
 
 ```bash
 pnpm verify:db   # connectivity check
@@ -241,18 +112,3 @@ pnpm studio      # Prisma Studio
 ### Deploy
 
 Import the repo on Vercel (Next.js). Set `DATABASE_URL` and the server AI key from `.env.example`. `postinstall` / `build` already run `prisma generate`.
-
----
-
-## Layout
-
-```
-app/page.tsx                 Dashboard orchestrator
-components/ats/              Reviewer UI
-src/actions/ats-review.ts    Batch review + job CRUD
-src/ats-engine/              Scoring pipeline
-lib/ats-engine.ts            LLM provider + throttle wrapper
-lib/ats-session.ts           In-flight review state
-src/repositories/            Prisma writes
-prisma/schema.prisma         Job / Candidate / ParsedResume / Application
-```
