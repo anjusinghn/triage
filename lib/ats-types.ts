@@ -119,3 +119,12 @@ export interface ReviewSessionResult {
   results: ReviewedCandidate[];
   progress: ReviewProgress;
 }
+
+export interface PastScan {
+  id: string;
+  jobId: string;
+  jobTitle: string;
+  scannedAt: string;
+  totalCandidates: number;
+  shortlisted: ReviewedCandidate[];
+}

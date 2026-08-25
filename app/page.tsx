@@ -23,6 +23,7 @@ import {
 import { getTierColor } from '@/lib/ats-tiers';
 import type {
   ATSJobPosting,
+  PastScan,
   ReviewedCandidate,
   ReviewProgress,
 } from '@/lib/ats-types';
@@ -34,6 +35,7 @@ import {
   getAtsReviewProgress,
   getAtsReviewResults,
   getLatestResultsForJob,
+  listPastShortlistedScans,
 } from '@/src/actions/ats-review';
 import {
   AIReviewerHeroHeader,
@@ -47,6 +49,7 @@ import {
   CandidatesRankingTable,
   CandidateDetailModal,
   ATSResumeModal,
+  PastScansPanel,
   type SortField,
   type SortOrder,
 } from '@/components/ats';
@@ -85,6 +88,9 @@ export default function AIReviewerPage() {
   const [positionEditorMode, setPositionEditorMode] = useState<'view' | 'edit' | 'create'>('view');
   const [jobs, setJobs] = useState<ATSJobPosting[]>([]);
   const [generatedCount, setGeneratedCount] = useState(GENERATED_RESUME_CAP);
+  const [generatedPreviews, setGeneratedPreviews] = useState<
+    Array<{ fileName: string; displayName: string }>
+  >([]);
   const [attachGeneratedResumes, setAttachGeneratedResumes] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -107,6 +113,9 @@ export default function AIReviewerPage() {
   const [resumeCandidate, setResumeCandidate] = useState<ReviewedCandidate | null>(null);
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [showPastScans, setShowPastScans] = useState(false);
+  const [pastScans, setPastScans] = useState<PastScan[]>([]);
+  const [pastScansLoading, setPastScansLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedJob = useMemo(
@@ -136,6 +145,7 @@ export default function AIReviewerPage() {
             : pickDefaultJobId(jobList)
         );
         setGeneratedCount(Math.min(generated.count, GENERATED_RESUME_CAP));
+        setGeneratedPreviews(generated.previews);
       } catch (err) {
         if (cancelled) return;
         const message = publicClientError(err, 'Failed to load ATS jobs.');
@@ -148,32 +158,6 @@ export default function AIReviewerPage() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (!selectedJobId || isReviewing || startingReview) return;
-
-    let cancelled = false;
-
-    async function loadPastReviews() {
-      try {
-        const past = await getLatestResultsForJob(selectedJobId);
-        if (cancelled) return;
-        setReviewedCandidates(past);
-        setHasReviewed(past.length > 0);
-      } catch (err) {
-        if (cancelled) return;
-        setReviewedCandidates([]);
-        setHasReviewed(false);
-        const message = publicClientError(err, 'Failed to load saved reviews.');
-        setErrorMessage(message);
-      }
-    }
-
-    void loadPastReviews();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedJobId, isReviewing, startingReview]);
 
   useEffect(() => {
     if (!sessionId || !isReviewing) return;
@@ -190,8 +174,11 @@ export default function AIReviewerPage() {
           setLiveProgress(next);
 
           if (next.status === 'completed') {
-            const fromDb = await getLatestResultsForJob(selectedJobId);
-            const results = fromDb.length > 0 ? fromDb : await getAtsReviewResults(sessionId);
+            const sessionResults = await getAtsReviewResults(sessionId);
+            const results =
+              sessionResults.length > 0
+                ? sessionResults
+                : await getLatestResultsForJob(selectedJobId);
             if (cancelled) return;
             setReviewedCandidates(results);
             setHasReviewed(true);
@@ -273,10 +260,8 @@ export default function AIReviewerPage() {
     : 0;
 
   const canStartReview =
-    Boolean(selectedJobId) && (files.length > 0 || generatedCount > 0);
-  const resumeCount = attachGeneratedResumes
-    ? generatedCount + files.length
-    : files.length;
+    Boolean(selectedJobId) && (files.length > 0 || attachGeneratedResumes);
+  const resumeCount = files.length + (attachGeneratedResumes ? generatedCount : 0);
 
   const handleRoleChange = useCallback((value: string | null) => {
     if (!value) return;
@@ -285,6 +270,8 @@ export default function AIReviewerPage() {
     setSessionId(null);
     setLiveProgress(null);
     setIsReviewing(false);
+    setHasReviewed(false);
+    setReviewedCandidates([]);
     setAttachGeneratedResumes(false);
   }, []);
 
@@ -324,6 +311,10 @@ export default function AIReviewerPage() {
           files: opts.extraFiles && opts.extraFiles.length > 0 ? opts.extraFiles : undefined,
         });
         setSessionId(started.sessionId);
+        if (started.status === 'running') {
+          setIsReviewing(true);
+          return;
+        }
         if (started.status === 'completed' && started.results.length > 0) {
           setReviewedCandidates(started.results);
           setHasReviewed(true);
@@ -336,7 +327,6 @@ export default function AIReviewerPage() {
         const message = publicClientError(err, 'Failed to start review.');
         setErrorMessage(message);
         setIsReviewing(false);
-        setAttachGeneratedResumes(false);
       } finally {
         setStartingReview(false);
       }
@@ -351,14 +341,15 @@ export default function AIReviewerPage() {
       const listed = await listGeneratedResumes();
       const cappedCount = Math.min(listed.count, GENERATED_RESUME_CAP);
       setGeneratedCount(cappedCount || GENERATED_RESUME_CAP);
-      await beginReview({ useExistingResumes: true });
+      setGeneratedPreviews(listed.previews);
+      setAttachGeneratedResumes(true);
     } catch (err) {
-      const message = publicClientError(err, 'Failed to start pre-generated review.');
+      const message = publicClientError(err, 'Failed to attach pre-generated resumes.');
       setErrorMessage(message);
     } finally {
       setAttaching(false);
     }
-  }, [beginReview]);
+  }, []);
 
   const handleFilesAdded = useCallback((incoming: FileList | File[]) => {
     const valid = Array.from(incoming).filter(isPdfFile);
@@ -382,14 +373,14 @@ export default function AIReviewerPage() {
 
   const handleStartReview = useCallback(async () => {
     if (!canStartReview) {
-      setErrorMessage('Drop or select PDF files first, or use the existing resume set.');
+      setErrorMessage('Drop or select PDF files first, or use the existing 30 resumes.');
       return;
     }
     await beginReview({
-      useExistingResumes: files.length === 0,
+      useExistingResumes: attachGeneratedResumes,
       extraFiles: files.length > 0 ? files : undefined,
     });
-  }, [beginReview, canStartReview, files]);
+  }, [attachGeneratedResumes, beginReview, canStartReview, files]);
 
   const toggleSort = useCallback(
     (field: SortField) => {
@@ -440,10 +431,24 @@ export default function AIReviewerPage() {
     setShowResumeModal(false);
   }, []);
 
+  const handleViewPastScans = useCallback(async () => {
+    setShowPastScans(true);
+    setPastScansLoading(true);
+    try {
+      const scans = await listPastShortlistedScans();
+      setPastScans(scans);
+    } catch (err) {
+      const message = publicClientError(err, 'Failed to load past scans.');
+      setErrorMessage(message);
+    } finally {
+      setPastScansLoading(false);
+    }
+  }, []);
+
   return (
     <div className="min-h-screen bg-gray-50 text-neutral-900">
       <main className="mx-auto w-full max-w-7xl space-y-6 px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
-        <AIReviewerHeroHeader />
+        <AIReviewerHeroHeader onViewPastScans={handleViewPastScans} />
 
         {errorMessage && (
           <div className="flex flex-col gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3.5 text-sm text-rose-900 sm:flex-row sm:items-center sm:justify-between">
@@ -549,27 +554,31 @@ export default function AIReviewerPage() {
               )}
             </div>
 
-            {(isReviewing || hasReviewed) && (
-              <Button
-                onClick={handleStartReview}
-                disabled={isReviewing || startingReview || !canStartReview}
-                size="lg"
-                className="h-12 px-8 text-white shadow-lg disabled:opacity-50"
-                style={{ backgroundColor: '#15aabf' }}
-              >
-                {isReviewing || startingReview ? (
-                  <>
-                    <Loading03Icon size={20} className="mr-2 animate-spin" />
-                    {startingReview ? 'Starting...' : `Analyzing... ${progressPercent}%`}
-                  </>
-                ) : (
-                  <>
-                    <RefreshIcon size={20} className="mr-2" />
-                    Re-run Analysis
-                  </>
-                )}
-              </Button>
-            )}
+            <Button
+              onClick={handleStartReview}
+              disabled={isReviewing || startingReview || !canStartReview}
+              size="lg"
+              className="h-12 px-8 text-white shadow-lg disabled:opacity-50"
+              style={{ backgroundColor: '#15aabf' }}
+            >
+              {isReviewing || startingReview ? (
+                <>
+                  <Loading03Icon size={20} className="mr-2 animate-spin" />
+                  {startingReview ? 'Starting...' : `Analyzing... ${progressPercent}%`}
+                </>
+              ) : hasReviewed ? (
+                <>
+                  <RefreshIcon size={20} className="mr-2" />
+                  Re-run Analysis
+                </>
+              ) : (
+                <>
+                  <PlayIcon size={20} className="mr-2" />
+                  Start AI review
+                  {resumeCount > 0 ? ` (${resumeCount})` : ''}
+                </>
+              )}
+            </Button>
           </div>
 
           {positionEditorMode === 'create' && (
@@ -600,117 +609,168 @@ export default function AIReviewerPage() {
           )}
 
           <div className="mt-4 rounded-lg border border-neutral-200 bg-white p-4">
-            <h3 className="text-sm font-semibold text-neutral-900">Import PDFs</h3>
-            <p className="mt-1 mb-3 text-xs text-neutral-500">
-              Drag in files or select them from your computer.
-            </p>
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              onDragOver={(e) => {
-                e.preventDefault();
-                setIsDragging(true);
-              }}
-              onDragLeave={(e) => {
-                e.preventDefault();
-                setIsDragging(false);
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                setIsDragging(false);
-                if (e.dataTransfer.files?.length) {
-                  handleFilesAdded(e.dataTransfer.files);
-                }
-              }}
-              className={`w-full rounded-xl border-2 border-dashed px-4 py-6 text-center transition-colors ${
-                isDragging
-                  ? 'border-[#15aabf] bg-[#15aabf]/10'
-                  : files.length > 0
-                    ? 'border-emerald-300 bg-emerald-50/40'
-                    : 'border-neutral-300 bg-neutral-50 hover:border-[#15aabf]'
-              }`}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept=".pdf,application/pdf"
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files?.length) {
-                    handleFilesAdded(e.target.files);
-                    e.target.value = '';
-                  }
-                }}
-              />
-              <File01Icon size={22} className="mx-auto mb-2 text-[#15aabf]" />
-              <p className="text-xs font-medium text-neutral-800">
-                Drop PDF resume(s) here, or <span className="underline">browse</span>
-              </p>
-            </button>
+            <div className="grid gap-4 sm:grid-cols-[1fr_auto_1fr] sm:items-stretch">
+              <div className="flex min-w-0 flex-col">
+                <h3 className="text-sm font-semibold text-neutral-900">Upload PDFs</h3>
+                <p className="mt-1 mb-3 text-xs text-neutral-500">
+                  Drag in files or select them from your computer.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDragging(true);
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    setIsDragging(false);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDragging(false);
+                    if (e.dataTransfer.files?.length) {
+                      handleFilesAdded(e.dataTransfer.files);
+                    }
+                  }}
+                  className={`flex min-h-[148px] w-full flex-1 flex-col items-center justify-center rounded-xl border-2 border-dashed px-4 py-5 text-center transition-colors ${
+                    isDragging
+                      ? 'border-[#15aabf] bg-[#15aabf]/10'
+                      : files.length > 0
+                        ? 'border-emerald-300 bg-emerald-50/40'
+                        : 'border-neutral-300 bg-neutral-50 hover:border-[#15aabf]'
+                  }`}
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept=".pdf,application/pdf"
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files?.length) {
+                        handleFilesAdded(e.target.files);
+                        e.target.value = '';
+                      }
+                    }}
+                  />
+                  <File01Icon size={22} className="mb-2 text-[#15aabf]" />
+                  <p className="text-xs font-medium text-neutral-800">
+                    Drop PDF resume(s) here, or <span className="underline">browse</span>
+                  </p>
+                </button>
 
-            {files.length > 0 && (
-              <div className="mt-3 space-y-2">
-                <div className="flex items-center justify-between text-xs text-neutral-500">
-                  <span>
-                    {files.length} file{files.length === 1 ? '' : 's'} selected
-                  </span>
-                  <button
-                    type="button"
-                    className="text-rose-600 hover:underline"
-                    onClick={() => setFiles([])}
-                  >
-                    Clear
-                  </button>
-                </div>
-                <ul className="max-h-28 space-y-1 overflow-y-auto">
-                  {files.map((file, idx) => (
-                    <li
-                      key={`${file.name}-${file.size}-${idx}`}
-                      className="flex items-center justify-between rounded-md bg-neutral-50 px-2 py-1 text-xs text-neutral-700"
-                    >
-                      <span className="truncate pr-2">{file.name}</span>
+                {files.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    <div className="flex items-center justify-between text-xs text-neutral-500">
+                      <span>
+                        {files.length} file{files.length === 1 ? '' : 's'} selected
+                      </span>
                       <button
                         type="button"
-                        onClick={() => handleRemoveFile(idx)}
-                        className="text-neutral-400 hover:text-rose-600"
-                        aria-label={`Remove ${file.name}`}
+                        className="text-rose-600 hover:underline"
+                        onClick={() => setFiles([])}
                       >
-                        <Cancel01Icon size={14} />
+                        Clear
                       </button>
-                    </li>
-                  ))}
-                </ul>
+                    </div>
+                    <ul className="max-h-28 space-y-1 overflow-y-auto">
+                      {files.map((file, idx) => (
+                        <li
+                          key={`${file.name}-${file.size}-${idx}`}
+                          className="flex items-center justify-between rounded-md bg-neutral-50 px-2 py-1 text-xs text-neutral-700"
+                        >
+                          <span className="truncate pr-2">{file.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveFile(idx)}
+                            className="text-neutral-400 hover:text-rose-600"
+                            aria-label={`Remove ${file.name}`}
+                          >
+                            <Cancel01Icon size={14} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
-            )}
 
-            <div className="relative my-5">
-              <div className="absolute inset-0 flex items-center" aria-hidden="true">
-                <div className="w-full border-t border-neutral-200" />
-              </div>
-              <div className="relative flex justify-center">
-                <span className="bg-white px-3 text-[11px] font-medium uppercase tracking-wider text-neutral-400">
+              <div className="flex items-center gap-3 sm:flex-col sm:justify-center sm:gap-0">
+                <div className="h-px flex-1 bg-neutral-200 sm:hidden" />
+                <div className="hidden w-px flex-1 bg-neutral-200 sm:block" />
+                <span className="shrink-0 px-2 text-[11px] font-medium uppercase tracking-wider text-neutral-400 sm:py-2">
                   or
                 </span>
+                <div className="h-px flex-1 bg-neutral-200 sm:hidden" />
+                <div className="hidden w-px flex-1 bg-neutral-200 sm:block" />
               </div>
-            </div>
 
-            <div className="text-center">
-              <p className="mb-2 text-xs text-neutral-500">Pre-generated resumes</p>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={handleUseExistingResumes}
-                disabled={attaching || isReviewing || startingReview}
-                className="h-11 w-full border-[#15aabf] text-[#15aabf] hover:bg-[#15aabf]/10"
-              >
-                {attaching || (startingReview && attachGeneratedResumes) ? (
-                  <Loading03Icon size={16} className="mr-2 animate-spin" />
-                ) : (
-                  <AttachmentIcon size={16} className="mr-2" />
-                )}
-                Use existing {generatedCount > 0 ? generatedCount : GENERATED_RESUME_CAP} resumes
-              </Button>
+              <div className="flex min-w-0 flex-col">
+                <h3 className="text-sm font-semibold text-neutral-900">Existing set</h3>
+                <p className="mt-1 mb-3 text-xs text-neutral-500">
+                  {attachGeneratedResumes
+                    ? `${generatedCount} sample resumes selected`
+                    : `${generatedCount} sample resumes ready to score`}
+                </p>
+
+                <div
+                  className={`mb-3 flex min-h-[148px] flex-1 flex-col items-center justify-center rounded-xl border px-4 py-5 ${
+                    attachGeneratedResumes
+                      ? 'border-[#15aabf] bg-[#15aabf]/10'
+                      : 'border-neutral-200 bg-neutral-50'
+                  }`}
+                >
+                  <div className="relative mb-3 h-[84px] w-[148px]">
+                    {(generatedPreviews.length > 0
+                      ? generatedPreviews.slice(0, 3)
+                      : [
+                          { fileName: 'a', displayName: 'Resume' },
+                          { fileName: 'b', displayName: 'Resume' },
+                          { fileName: 'c', displayName: 'Resume' },
+                        ]
+                    ).map((preview, index) => (
+                      <div
+                        key={preview.fileName}
+                        className="absolute flex h-[72px] w-[112px] flex-col rounded-md border border-neutral-200 bg-white p-2 shadow-sm"
+                        style={{ left: index * 14, top: index * 6, zIndex: index }}
+                      >
+                        <File01Icon size={14} className="text-[#15aabf]" />
+                        <span className="mt-auto truncate text-[10px] font-medium text-neutral-700">
+                          {preview.displayName}
+                        </span>
+                        <span className="text-[9px] uppercase tracking-wide text-neutral-400">
+                          PDF
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  {attachGeneratedResumes ? (
+                    <p className="text-[11px] font-medium text-[#15aabf]">
+                      {generatedCount} resumes selected
+                    </p>
+                  ) : generatedCount > 3 ? (
+                    <p className="text-[11px] text-neutral-500">+{generatedCount - 3} more</p>
+                  ) : null}
+                </div>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleUseExistingResumes}
+                  disabled={attaching || isReviewing || startingReview}
+                  className="h-11 w-full border-[#15aabf] text-[#15aabf] hover:bg-[#15aabf]/10"
+                >
+                  {attaching ? (
+                    <Loading03Icon size={16} className="mr-2 animate-spin" />
+                  ) : (
+                    <AttachmentIcon size={16} className="mr-2" />
+                  )}
+                  {attachGeneratedResumes
+                    ? `${generatedCount} resumes selected`
+                    : `Use ${generatedCount > 0 ? generatedCount : GENERATED_RESUME_CAP} resumes`}
+                </Button>
+              </div>
             </div>
           </div>
 
@@ -737,15 +797,17 @@ export default function AIReviewerPage() {
             >
               <AiBrain01Icon size={32} style={{ color: '#15aabf' }} />
             </div>
-            <h3 className="mb-2 text-lg font-semibold text-neutral-900">No saved reviews yet</h3>
+            <h3 className="mb-2 text-lg font-semibold text-neutral-900">No review yet</h3>
             <p className="mb-6 max-w-md text-center text-neutral-600">
-              Import PDFs and run AI Review. Results are stored and will show up here next time.
+              {canStartReview
+                ? `Ready to score ${resumeCount} resume${resumeCount === 1 ? '' : 's'}. Press Start AI review to begin.`
+                : 'Import PDFs or attach the existing 30 resumes, then press Start AI review.'}
             </p>
             <Button
               onClick={handleStartReview}
               disabled={startingReview || !canStartReview}
               size="lg"
-              className="h-14 px-10 text-base font-medium text-white shadow-lg"
+              className="h-14 px-10 text-base font-medium text-white shadow-lg disabled:opacity-50"
               style={{ backgroundColor: '#15aabf' }}
             >
               {startingReview ? (
@@ -756,7 +818,7 @@ export default function AIReviewerPage() {
               ) : (
                 <>
                   <PlayIcon size={22} className="mr-3" />
-                  AI Review
+                  Start AI review
                   {resumeCount > 0 ? ` for ${resumeCount} resumes` : ''}
                 </>
               )}
@@ -764,7 +826,7 @@ export default function AIReviewerPage() {
             {!canStartReview && (
               <p className="mt-3 flex items-center gap-1 text-xs text-neutral-500">
                 <UserGroupIcon size={14} />
-                Import PDFs to enable AI Review, or use the existing resume set
+                Import PDFs or attach the existing 30 resumes to enable Start AI review
               </p>
             )}
           </div>
@@ -816,6 +878,13 @@ export default function AIReviewerPage() {
       {showResumeModal && resumeCandidate && (
         <ATSResumeModal candidate={resumeCandidate} onClose={closeResumeModal} />
       )}
+
+      <PastScansPanel
+        open={showPastScans}
+        onClose={() => setShowPastScans(false)}
+        scans={pastScans}
+        loading={pastScansLoading}
+      />
     </div>
   );
 }

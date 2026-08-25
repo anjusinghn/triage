@@ -23,10 +23,12 @@ import type {
   CandidateTier,
   EmploymentType,
   LocationType,
+  PastScan,
   RecommendedAction,
   ReviewProgress,
   ReviewedCandidate,
 } from '@/lib/ats-types';
+import { selectShortlisted } from '@/lib/ats-shortlist';
 
 const GENERATED_RESUMES_DIR = path.join(process.cwd(), 'data', 'generated-resumes');
 
@@ -320,6 +322,7 @@ function mapEngineOutputToCandidate(args: {
 }
 
 function mapApplicationToReviewedCandidate(application: {
+  jobId?: string;
   matchScore: number;
   justification: string;
   tier: string;
@@ -343,6 +346,8 @@ function mapApplicationToReviewedCandidate(application: {
     parsedResumes?: Array<{
       fileName: string;
       extractedText: string;
+      justification?: string | null;
+      jobJustifications?: unknown;
       education: unknown;
     }>;
   };
@@ -352,6 +357,16 @@ function mapApplicationToReviewedCandidate(application: {
   const parsedResume =
     application.candidate.parsedResumes?.find((item) => item.fileName === application.fileName) ??
     application.candidate.parsedResumes?.[0];
+  const storedJobJustification = readJobJustification(
+    parsedResume?.jobJustifications,
+    application.jobId
+  );
+  const justification =
+    application.justification?.trim() ||
+    storedJobJustification ||
+    parsedResume?.justification?.trim() ||
+    application.aiSummary?.trim() ||
+    '';
   return {
     id: application.candidate.id,
     name: application.candidate.name,
@@ -363,7 +378,7 @@ function mapApplicationToReviewedCandidate(application: {
     education: parsedResume
       ? readEducationBlob(parsedResume.education)
       : readEducationBlob(application.candidate.education),
-    resumeText: parsedResume?.extractedText || application.aiSummary || application.justification || '',
+    resumeText: parsedResume?.extractedText || application.aiSummary || justification || '',
     fileName: application.fileName ?? undefined,
     atsScore,
     skillMatch: application.skillMatch,
@@ -375,9 +390,20 @@ function mapApplicationToReviewedCandidate(application: {
     recommendedAction: application.recommendedAction,
     strengths: application.strengths ?? [],
     concerns: application.concerns ?? [],
-    aiSummary: application.aiSummary ?? application.justification,
-    justification: application.justification || application.aiSummary || '',
+    aiSummary: application.aiSummary ?? justification,
+    justification,
   };
+}
+
+function readJobJustification(value: unknown, jobId?: string): string {
+  if (!jobId || !value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const entry = (value as Record<string, unknown>)[jobId];
+  if (!entry) return '';
+  if (typeof entry === 'string') return entry.trim();
+  if (typeof entry === 'object' && entry && 'justification' in entry) {
+    return String((entry as { justification?: unknown }).justification || '').trim();
+  }
+  return '';
 }
 
 async function persistReviewedCandidate(
@@ -389,6 +415,7 @@ async function persistReviewedCandidate(
     extractedText: string;
     normalizedText?: string | null;
     source: string;
+    jobTitle?: string;
   }
 ): Promise<ReviewedCandidate> {
   const parsed = parseResume(extras.extractedText || extras.normalizedText || '');
@@ -428,6 +455,11 @@ async function persistReviewedCandidate(
     fileName: reviewed.fileName || 'resume.pdf',
     extractedText: extras.extractedText,
     normalizedText: extras.normalizedText ?? null,
+    justification: reviewed.aiSummary || reviewed.justification || '',
+    jobId,
+    jobTitle: extras.jobTitle,
+    matchScore: reviewed.atsScore,
+    tier: reviewed.tier,
     skills: parsed.skills,
     workExperience: parsed.workExperience,
     education: parsed.education,
@@ -501,6 +533,7 @@ async function processQueuedResume(
       extractedText: output.extractedText || '',
       normalizedText: output.normalizedText || null,
       source: item.diskPath ? 'generated' : 'upload',
+      jobTitle: session.jobTitle,
     });
 
     if (progressItem) {
@@ -697,11 +730,19 @@ export async function deleteAtsJob(jobId: string): Promise<{ deletedId: string }
   }
 }
 
-export async function listGeneratedResumes(): Promise<{ fileName: string; count: number }> {
+export async function listGeneratedResumes(): Promise<{
+  fileName: string;
+  count: number;
+  previews: Array<{ fileName: string; displayName: string }>;
+}> {
   const fileNames = await listGeneratedPdfFileNames();
   return {
     fileName: 'data/generated-resumes/*.pdf',
     count: fileNames.length,
+    previews: fileNames.slice(0, 4).map((fileName) => ({
+      fileName,
+      displayName: nameFromFileName(fileName),
+    })),
   };
 }
 
@@ -762,43 +803,42 @@ export async function startAtsReview(input: {
 
   const generatedOnly = Boolean(input.attachGeneratedResumes) && !input.files?.length;
 
-  if (generatedOnly) {
-    const past = await getLatestResultsForJob(job.id);
-    if (past.length > 0) {
-      const sessionId = randomUUID();
-      const startedAt = Date.now();
-      createAtsSession({
-        sessionId,
-        jobId: job.id,
-        jobTitle: job.title,
-        startedAt,
-        clientIp: await getClientIp(),
-        progress: {
+  if (queue.length === 0) {
+    if (generatedOnly) {
+      const past = await getLatestResultsForJob(job.id);
+      if (past.length > 0) {
+        const sessionId = randomUUID();
+        const startedAt = Date.now();
+        createAtsSession({
           sessionId,
           jobId: job.id,
           jobTitle: job.title,
-          status: 'completed',
-          totalCandidates: past.length,
-          processedCount: past.length,
-          completedCount: past.length,
-          failedCount: 0,
-          candidates: past.map((candidate) => ({
-            candidateId: candidate.id,
-            candidateName: candidate.name,
-            fileName: candidate.fileName || `${candidate.name}.pdf`,
+          startedAt,
+          clientIp: await getClientIp(),
+          progress: {
+            sessionId,
+            jobId: job.id,
+            jobTitle: job.title,
             status: 'completed',
-            atsScore: candidate.atsScore,
-            tier: candidate.tier,
-          })),
-          elapsedTimeMs: 0,
-        },
-        results: past,
-      });
-      return { sessionId, status: 'completed', results: past };
+            totalCandidates: past.length,
+            processedCount: past.length,
+            completedCount: past.length,
+            failedCount: 0,
+            candidates: past.map((candidate) => ({
+              candidateId: candidate.id,
+              candidateName: candidate.name,
+              fileName: candidate.fileName || `${candidate.name}.pdf`,
+              status: 'completed',
+              atsScore: candidate.atsScore,
+              tier: candidate.tier,
+            })),
+            elapsedTimeMs: 0,
+          },
+          results: past,
+        });
+        return { sessionId, status: 'completed', results: past };
+      }
     }
-  }
-
-  if (queue.length === 0) {
     throw new Error('Add at least one resume to start an AI review.');
   }
 
@@ -845,17 +885,10 @@ export async function startAtsReview(input: {
   const jobInput = toJobInput(job);
 
   if (skipLlm) {
-    await runAtsReview(sessionId, jobInput, queue, { skipLlm: true });
-    const session = getAtsSession(sessionId);
-    const results = getAtsSessionResults(sessionId);
-    return {
-      sessionId,
-      status: session?.progress.status === 'failed' ? 'running' : 'completed',
-      results,
-    };
+    after(() => runAtsReview(sessionId, jobInput, queue, { skipLlm: true }));
+  } else {
+    after(() => runAtsReview(sessionId, jobInput, queue));
   }
-
-  after(() => runAtsReview(sessionId, jobInput, queue));
 
   return { sessionId, status: 'running', results: [] };
   } catch (err) {
@@ -903,6 +936,71 @@ export async function getLatestResultsForJob(jobId: string): Promise<ReviewedCan
     return applications.map(mapApplicationToReviewedCandidate);
   } catch (err) {
     console.warn('Failed to load latest ATS results for job:', err);
+    return [];
+  }
+}
+
+export async function listPastShortlistedScans(): Promise<PastScan[]> {
+  try {
+    const applications = await prisma.application.findMany({
+      include: {
+        job: true,
+        candidate: {
+          include: {
+            parsedResumes: {
+              orderBy: { updatedAt: 'desc' },
+            },
+          },
+        },
+      },
+      orderBy: [{ matchScore: 'desc' }, { createdAt: 'desc' }],
+    });
+
+    const grouped = new Map<
+      string,
+      {
+        jobTitle: string;
+        latestCreatedAt: Date;
+        applications: typeof applications;
+      }
+    >();
+
+    for (const application of applications) {
+      const existing = grouped.get(application.jobId);
+      if (existing) {
+        existing.applications.push(application);
+        if (application.createdAt > existing.latestCreatedAt) {
+          existing.latestCreatedAt = application.createdAt;
+        }
+      } else {
+        grouped.set(application.jobId, {
+          jobTitle: application.job.title,
+          latestCreatedAt: application.createdAt,
+          applications: [application],
+        });
+      }
+    }
+
+    const scans: PastScan[] = [];
+    for (const [jobId, group] of grouped) {
+      const mapped = group.applications.map(mapApplicationToReviewedCandidate);
+      const shortlisted = selectShortlisted(mapped).shortlisted.filter(
+        (candidate) => candidate.tier === 'top' || candidate.tier === 'qualified'
+      );
+      if (shortlisted.length === 0) continue;
+      scans.push({
+        id: jobId,
+        jobId,
+        jobTitle: group.jobTitle,
+        scannedAt: group.latestCreatedAt.toISOString(),
+        totalCandidates: mapped.length,
+        shortlisted,
+      });
+    }
+
+    return scans.sort((a, b) => b.scannedAt.localeCompare(a.scannedAt));
+  } catch (err) {
+    console.warn('Failed to load past shortlisted scans:', err);
     return [];
   }
 }

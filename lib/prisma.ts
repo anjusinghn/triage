@@ -3,7 +3,11 @@ import { Pool } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '@prisma/client';
 
-const globalForPrisma = global as unknown as { prisma?: PrismaClient };
+const PRISMA_SCHEMA_VERSION = 'parsed-resume-justifications-v1';
+const globalForPrisma = global as unknown as {
+  prisma?: PrismaClient;
+  prismaSchemaVersion?: string;
+};
 
 function normalizeDatabaseUrl(url: string): string {
   try {
@@ -41,8 +45,12 @@ function createPrismaClient(): PrismaClient {
   });
 }
 
-export const prisma = globalForPrisma.prisma || createPrismaClient();
+if (globalForPrisma.prismaSchemaVersion !== PRISMA_SCHEMA_VERSION) {
+  void globalForPrisma.prisma?.$disconnect();
+  globalForPrisma.prisma = createPrismaClient();
+  globalForPrisma.prismaSchemaVersion = PRISMA_SCHEMA_VERSION;
+}
 
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
+export const prisma = globalForPrisma.prisma as PrismaClient;
 
 export default prisma;

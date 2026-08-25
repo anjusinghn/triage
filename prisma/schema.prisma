@@ -45,6 +45,8 @@ model ParsedResume {
   mimeType             String   @default("application/pdf")
   extractedText        String
   normalizedText       String?
+  justification        String   @default("")
+  jobJustifications    Json     @default("{}")
   skills               Json
   workExperience       Json
   education            Json

@@ -20,7 +20,7 @@ const playfairDisplay = Playfair_Display({
 });
 
 export const metadata: Metadata = {
-  title: 'AI Reviewer | ATS Candidate Screening',
+  title: 'Smart Resume Screener',
   description:
     'AI-powered ATS candidate review and ranking against a target position.',
 };

@@ -12,6 +12,7 @@ export { ReviewProgressBar } from "./ReviewProgressBar";
 export { LiveReviewPanel } from "./LiveReviewPanel";
 export { TopTalentsSection } from "./TopTalentsSection";
 export { ShortlistedSection } from "./ShortlistedSection";
+export { PastScansPanel } from "./PastScansPanel";
 export { CandidatesRankingTable } from "./CandidatesRankingTable";
 export { CandidateDetailModal } from "./CandidateDetailModal";
 export { ATSResumeModal } from "./ATSResumeModal";

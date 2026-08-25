@@ -43,6 +43,11 @@ export type ParsedResumeWrite = {
   mimeType?: string;
   extractedText: string;
   normalizedText?: string | null;
+  justification?: string;
+  jobId?: string;
+  jobTitle?: string;
+  matchScore?: number;
+  tier?: string;
   skills: unknown;
   workExperience: unknown;
   education: unknown;
@@ -337,34 +342,64 @@ export class CandidateRepository {
     data: ParsedResumeWrite
   ): Promise<void> {
     try {
-      await prisma.parsedResume.upsert({
-        where: { contentHash: data.contentHash },
-        create: {
-          candidateId,
-          contentHash: data.contentHash,
-          fileName: data.fileName,
-          mimeType: data.mimeType ?? 'application/pdf',
-          extractedText: data.extractedText,
-          normalizedText: data.normalizedText ?? null,
-          skills: data.skills as Prisma.InputJsonValue,
-          workExperience: data.workExperience as Prisma.InputJsonValue,
-          education: data.education as Prisma.InputJsonValue,
-          totalYearsExperience: data.totalYearsExperience,
-          highestSeniority: data.highestSeniority ?? null,
-          source: data.source ?? 'upload',
-        },
-        update: {
-          candidateId,
-          fileName: data.fileName,
-          mimeType: data.mimeType ?? 'application/pdf',
-          extractedText: data.extractedText,
-          normalizedText: data.normalizedText ?? null,
-          skills: data.skills as Prisma.InputJsonValue,
-          workExperience: data.workExperience as Prisma.InputJsonValue,
-          education: data.education as Prisma.InputJsonValue,
-          totalYearsExperience: data.totalYearsExperience,
-          highestSeniority: data.highestSeniority ?? null,
-          source: data.source ?? 'upload',
+      const justification = data.justification?.trim() || '';
+      const existing =
+        (await prisma.parsedResume.findUnique({
+          where: { contentHash: data.contentHash },
+          select: { id: true, jobJustifications: true },
+        })) ??
+        (await prisma.parsedResume.findFirst({
+          where: { candidateId, fileName: data.fileName },
+          select: { id: true, jobJustifications: true },
+        }));
+      const previousJustifications =
+        existing?.jobJustifications &&
+        typeof existing.jobJustifications === 'object' &&
+        !Array.isArray(existing.jobJustifications)
+          ? (existing.jobJustifications as Record<string, unknown>)
+          : {};
+      const jobJustifications = data.jobId
+        ? {
+            ...previousJustifications,
+            [data.jobId]: {
+              jobId: data.jobId,
+              jobTitle: data.jobTitle || '',
+              justification,
+              score: data.matchScore ?? 0,
+              tier: data.tier || '',
+            },
+          }
+        : previousJustifications;
+
+      const payload = {
+        candidateId,
+        contentHash: data.contentHash,
+        fileName: data.fileName,
+        mimeType: data.mimeType ?? 'application/pdf',
+        extractedText: data.extractedText,
+        normalizedText: data.normalizedText ?? null,
+        ...(justification ? { justification } : {}),
+        jobJustifications: jobJustifications as Prisma.InputJsonValue,
+        skills: data.skills as Prisma.InputJsonValue,
+        workExperience: data.workExperience as Prisma.InputJsonValue,
+        education: data.education as Prisma.InputJsonValue,
+        totalYearsExperience: data.totalYearsExperience,
+        highestSeniority: data.highestSeniority ?? null,
+        source: data.source ?? 'upload',
+      };
+
+      if (existing) {
+        await prisma.parsedResume.update({
+          where: { id: existing.id },
+          data: payload,
+        });
+        return;
+      }
+
+      await prisma.parsedResume.create({
+        data: {
+          ...payload,
+          justification,
         },
       });
     } catch (err) {
