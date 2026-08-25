@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/prisma';
 import type { Prisma, Job, Candidate, Application } from '@prisma/client';
+import { FRONTEND_JOB_SEED, FULLSTACK_JOB_SEED } from '@/lib/ats-default-jobs';
 
 export interface CandidateData {
   id?: string;
@@ -79,39 +80,20 @@ function jobSlugFromTitle(title: string): string {
   return `${base || 'position'}-${Date.now().toString(36)}`;
 }
 
-const FULLSTACK_DESCRIPTION = `We are looking for a hands-on Senior Full Stack Engineer who can turn ambiguous customer problems into reliable, high-performing features. You will make pragmatic tradeoffs that keep us shipping quickly while protecting quality and maintainability.
-
-What you'll do:
-- Lead customer-facing features across Next.js/React, Node.js, and PostgreSQL, from design through rollout.
-- Own service contracts and API design; keep performance budgets realistic and visible.
-- Mentor and unblock teammates through pairing, thoughtful code reviews, and short design docs.
-- Instrument features with metrics, logs, and alerts; close the loop with incident reviews.
-- Raise the bar on reliability with feature flags, progressive delivery, and targeted tests.
-- Partner with GTM to scope feasibility for prospects and pilots without overpromising.`;
-
 export const DEFAULT_JOB_RECORD: Job = {
   id: 'default-job-id',
-  title: 'Senior Full Stack Engineer',
-  description: FULLSTACK_DESCRIPTION,
-  slug: 'fullstack',
-  mustHaveSkills: ['React', 'TypeScript', 'Node.js', 'PostgreSQL', 'REST APIs', 'Git'],
-  niceToHaveSkills: [
-    'GraphQL',
-    'AWS',
-    'Docker',
-    'Kubernetes',
-    'Redis',
-    'MongoDB',
-    'Next.js',
-    'Python',
-  ],
-  requiredExperienceYears: 5,
-  department: 'Engineering',
-  location: 'San Francisco, CA',
-  locationType: 'hybrid',
-  employmentType: 'full-time',
-  salaryMin: 150000,
-  salaryMax: 200000,
+  title: FULLSTACK_JOB_SEED.title,
+  description: FULLSTACK_JOB_SEED.description,
+  slug: FULLSTACK_JOB_SEED.slug,
+  mustHaveSkills: FULLSTACK_JOB_SEED.mustHaveSkills,
+  niceToHaveSkills: FULLSTACK_JOB_SEED.niceToHaveSkills,
+  requiredExperienceYears: FULLSTACK_JOB_SEED.requiredExperienceYears,
+  department: FULLSTACK_JOB_SEED.department,
+  location: FULLSTACK_JOB_SEED.location,
+  locationType: FULLSTACK_JOB_SEED.locationType,
+  employmentType: FULLSTACK_JOB_SEED.employmentType,
+  salaryMin: FULLSTACK_JOB_SEED.salaryMin,
+  salaryMax: FULLSTACK_JOB_SEED.salaryMax,
   createdAt: new Date(),
 };
 
@@ -405,6 +387,24 @@ export class CandidateRepository {
     } catch (err) {
       console.error('Database parsed-resume write failed:', err);
       throw new Error('Could not save the parsed resume.');
+    }
+  }
+
+  /**
+   * Create the default fullstack and frontend jobs when they are missing.
+   */
+  async ensureSeededJobs(): Promise<void> {
+    try {
+      const existing = await prisma.job.findMany({ select: { slug: true } });
+      const slugs = new Set(existing.map((job) => job.slug));
+      if (!slugs.has(FULLSTACK_JOB_SEED.slug)) {
+        await prisma.job.create({ data: FULLSTACK_JOB_SEED });
+      }
+      if (!slugs.has(FRONTEND_JOB_SEED.slug)) {
+        await prisma.job.create({ data: FRONTEND_JOB_SEED });
+      }
+    } catch (err) {
+      console.warn('Could not ensure default job postings:', err);
     }
   }
 
