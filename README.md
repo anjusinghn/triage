@@ -24,6 +24,9 @@
 
 ## Architecture
 
+<img width="1394" height="477" alt="image" src="https://github.com/user-attachments/assets/72482eb0-8af9-4488-bd70-e805af6bd539" />
+
+
 | Layer | Path | Responsibility |
 |---|---|---|
 | UI | `app/page.tsx`, `components/ats/` | Job CRUD, PDF upload, live progress, ranking, candidate detail |
